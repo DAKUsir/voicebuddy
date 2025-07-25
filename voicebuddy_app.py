@@ -11,30 +11,29 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import requests
 from typing import Dict, List, Optional
 import difflib
-import wave
-import tempfile
 import numpy as np
 import sys
+import sounddevice as sd
+import soundfile as sf
+import tempfile
 import traceback
 
 def show_traceback(type, value, tb):
+    """Show traceback and pause on uncaught exceptions"""
     traceback.print_exception(type, value, tb)
     input("Press Enter to close...")
 
 sys.excepthook = show_traceback
 
-
-# For speech functionality (install with: pip install openai-whisper pyttsx3 pyaudio soundfile)
+# For speech functionality (install with: pip install openai-whisper pyttsx3 sounddevice soundfile)
 try:
     import whisper
-    import pyaudio
-    import soundfile as sf
     import pyttsx3
     SPEECH_AVAILABLE = True
     print("Whisper and audio modules loaded successfully!")
 except ImportError as e:
     SPEECH_AVAILABLE = False
-    print(f"Speech modules not available. Install with: pip install openai-whisper pyttsx3 pyaudio soundfile\nError: {e}")
+    print(f"Speech modules not available. Install with: pip install openai-whisper pyttsx3 sounddevice soundfile\nError: {e}")
 
 class VoiceBuddyAI:
     def __init__(self, root):
@@ -50,16 +49,15 @@ class VoiceBuddyAI:
         
         # Speech components
         if SPEECH_AVAILABLE:
-            # Initialize Whisper model (using base model for balance of speed/accuracy)
+            # Initialize Whisper model
             self.whisper_model = None
             self.load_whisper_model()
             
             # Audio recording parameters
-            self.audio_format = pyaudio.paInt16
+            self.sample_rate = 16000  # Whisper works best with 16kHz
             self.channels = 1
-            self.rate = 16000  # Whisper works best with 16kHz
-            self.chunk = 1024
-            self.pyaudio_instance = pyaudio.PyAudio()
+            self.audio_data = []
+            self.temp_filename = None
             
             # TTS setup
             try:
@@ -73,26 +71,25 @@ class VoiceBuddyAI:
         self.current_phrase = ""
         self.current_context = ""
         self.is_recording = False
-        self.audio_frames = []
         
         # Create GUI
         self.create_widgets()
         self.update_stats()
         
-        # AI API Configuration (you'll need to set your API key)
+        # AI API Configuration
         self.api_key = "YOUR_ANTHROPIC_API_KEY"  # Replace with actual API key
         
     def load_whisper_model(self):
-     try:
-        print("Loading Whisper model... This may take a moment on first run.")
-        model_size = self.settings.get('whisper_model_size', 'base')
-        self.whisper_model = whisper.load_model(model_size)
-        print(f"Whisper model '{model_size}' loaded successfully!")
-     except Exception as e:
-        print(f"Error loading Whisper model: {e}")
-        self.whisper_model = None
+        """Load Whisper model"""
+        try:
+            print("Loading Whisper model... This may take a moment on first run.")
+            model_size = self.settings.get('whisper_model_size', 'base')
+            self.whisper_model = whisper.load_model(model_size)
+            print(f"Whisper model '{model_size}' loaded successfully!")
+        except Exception as e:
+            print(f"Error loading Whisper model: {e}")
+            self.whisper_model = None
 
-        
     def load_data(self):
         """Load user data and settings"""
         try:
@@ -143,7 +140,6 @@ class VoiceBuddyAI:
     
     def create_widgets(self):
         """Create the main GUI interface"""
-        # Create main frames
         self.create_header()
         self.create_sidebar()
         self.create_main_content()
@@ -177,12 +173,10 @@ class VoiceBuddyAI:
         main_container = tk.Frame(self.root, bg='#f0f0f0')
         main_container.pack(fill='both', expand=True, padx=10, pady=10)
         
-        # Sidebar
         sidebar_frame = tk.Frame(main_container, bg='white', width=300)
         sidebar_frame.pack(side='left', fill='y', padx=(0, 10))
         sidebar_frame.pack_propagate(False)
         
-        # Settings section
         settings_label = tk.Label(
             sidebar_frame,
             text="🎯 Practice Settings",
@@ -192,38 +186,32 @@ class VoiceBuddyAI:
         )
         settings_label.pack(pady=(20, 10), padx=20, anchor='w')
         
-        # Focus Area
         self.create_setting_dropdown(
             sidebar_frame, "Focus Area:", 'focus_area',
             ["general", "pronunciation", "articulation", "fluency", 
              "consonants", "vowels", "tongue_twisters"]
         )
         
-        # Difficulty Level
         self.create_setting_dropdown(
             sidebar_frame, "Difficulty Level:", 'difficulty_level',
             ["beginner", "intermediate", "advanced", "adaptive"]
         )
         
-        # Whisper Model Size
         self.create_setting_dropdown(
             sidebar_frame, "Whisper Model:", 'whisper_model_size',
             ["tiny", "base", "small", "medium"]
         )
         
-        # Topic Interest
         self.create_setting_entry(
             sidebar_frame, "Topic Interest:", 'topic_interest',
             "e.g., animals, technology, sports"
         )
         
-        # Phrase Length
         self.create_setting_dropdown(
             sidebar_frame, "Phrase Length:", 'phrase_length',
             ["short", "medium", "long"]
         )
         
-        # Model status indicator
         self.model_status_label = tk.Label(
             sidebar_frame,
             text="🔄 Loading Whisper model...",
@@ -233,10 +221,8 @@ class VoiceBuddyAI:
         )
         self.model_status_label.pack(pady=(10, 0), padx=20)
         
-        # Update model status periodically
         self.check_model_status()
         
-        # Stats section
         stats_label = tk.Label(
             sidebar_frame,
             text="📊 Quick Stats",
@@ -249,7 +235,6 @@ class VoiceBuddyAI:
         self.stats_frame = tk.Frame(sidebar_frame, bg='white')
         self.stats_frame.pack(fill='x', padx=20)
         
-        # Store references to main container for main content
         self.main_container = main_container
     
     def check_model_status(self):
@@ -257,7 +242,7 @@ class VoiceBuddyAI:
         if self.whisper_model is not None:
             self.model_status_label.config(text="✅ Whisper model ready", fg='#10b981')
         else:
-            self.root.after(2000, self.check_model_status)  # Check again in 2 seconds
+            self.root.after(2000, self.check_model_status)
     
     def create_setting_dropdown(self, parent, label_text, setting_key, options):
         """Create a dropdown setting widget"""
@@ -293,7 +278,6 @@ class VoiceBuddyAI:
         """Update a setting and save"""
         self.settings[key] = value
         
-        # If Whisper model size changed, reload model
         if key == 'whisper_model_size' and SPEECH_AVAILABLE:
             self.model_status_label.config(text="🔄 Loading new model...", fg='#666')
             self.whisper_model = None
@@ -306,7 +290,6 @@ class VoiceBuddyAI:
         content_frame = tk.Frame(self.main_container, bg='#f0f0f0')
         content_frame.pack(side='right', fill='both', expand=True)
         
-        # Practice section
         practice_card = tk.Frame(content_frame, bg='white', relief='raised', bd=1)
         practice_card.pack(fill='x', pady=(0, 10))
         
@@ -319,7 +302,6 @@ class VoiceBuddyAI:
         )
         practice_title.pack(pady=(20, 10))
         
-        # Phrase display
         self.phrase_text = tk.Text(
             practice_card,
             height=4,
@@ -334,7 +316,6 @@ class VoiceBuddyAI:
         self.phrase_text.insert('1.0', "Click 'Generate AI Phrase' to get started!")
         self.phrase_text.config(state='disabled')
         
-        # Context display
         self.context_text = scrolledtext.ScrolledText(
             practice_card,
             height=3,
@@ -346,7 +327,6 @@ class VoiceBuddyAI:
         self.context_text.pack(fill='x', padx=20, pady=(0, 15))
         self.context_text.config(state='disabled')
         
-        # Control buttons
         button_frame = tk.Frame(practice_card, bg='white')
         button_frame.pack(pady=(0, 20))
         
@@ -393,7 +373,6 @@ class VoiceBuddyAI:
             )
             self.record_btn.pack(side='left')
         
-        # Results section
         self.results_card = tk.Frame(content_frame, bg='white', relief='raised', bd=1)
         self.results_card.pack(fill='both', expand=True)
         
@@ -406,7 +385,6 @@ class VoiceBuddyAI:
         )
         results_title.pack(pady=(20, 10))
         
-        # Create results content
         self.create_results_content()
     
     def create_results_content(self):
@@ -414,11 +392,9 @@ class VoiceBuddyAI:
         results_container = tk.Frame(self.results_card, bg='white')
         results_container.pack(fill='both', expand=True, padx=20, pady=(0, 20))
         
-        # Left side - transcription and analysis
         left_frame = tk.Frame(results_container, bg='white')
         left_frame.pack(side='left', fill='both', expand=True, padx=(0, 10))
         
-        # Transcription
         trans_label = tk.Label(left_frame, text="🧠 Whisper heard:", font=("Arial", 12, "bold"), bg='white')
         trans_label.pack(anchor='w', pady=(10, 5))
         
@@ -428,7 +404,6 @@ class VoiceBuddyAI:
         self.transcription_text.pack(fill='x', pady=(0, 10))
         self.transcription_text.config(state='disabled')
         
-        # AI Analysis
         analysis_label = tk.Label(left_frame, text="🤖 AI Analysis:", font=("Arial", 12, "bold"), bg='white')
         analysis_label.pack(anchor='w', pady=(10, 5))
         
@@ -438,12 +413,10 @@ class VoiceBuddyAI:
         self.analysis_text.pack(fill='both', expand=True)
         self.analysis_text.config(state='disabled')
         
-        # Right side - score and progress
         right_frame = tk.Frame(results_container, bg='white', width=250)
         right_frame.pack(side='right', fill='y')
         right_frame.pack_propagate(False)
         
-        # Score display
         score_label = tk.Label(right_frame, text="Score", font=("Arial", 12, "bold"), bg='white')
         score_label.pack(pady=(10, 5))
         
@@ -457,7 +430,6 @@ class VoiceBuddyAI:
         )
         score_display.pack(pady=10)
         
-        # Progress chart
         self.create_progress_chart(right_frame)
     
     def create_progress_chart(self, parent):
@@ -465,12 +437,10 @@ class VoiceBuddyAI:
         chart_label = tk.Label(parent, text="📈 Progress", font=("Arial", 12, "bold"), bg='white')
         chart_label.pack(pady=(20, 5))
         
-        # Create matplotlib figure
         self.fig, self.ax = plt.subplots(figsize=(3, 2))
         self.fig.patch.set_facecolor('white')
         self.ax.set_facecolor('white')
         
-        # Embed in tkinter
         self.canvas = FigureCanvasTkAgg(self.fig, parent)
         self.canvas.get_tk_widget().pack(fill='both', expand=True, pady=10)
         
@@ -527,7 +497,6 @@ class VoiceBuddyAI:
         """Generate AI-powered practice phrase"""
         self.generate_btn.config(state='disabled', text="🤖 Generating...")
         
-        # Run in separate thread to avoid freezing UI
         thread = threading.Thread(target=self._generate_phrase_thread)
         thread.daemon = True
         thread.start()
@@ -536,19 +505,14 @@ class VoiceBuddyAI:
         """Generate phrase in separate thread"""
         try:
             phrase_data = self.call_ai_api_for_phrase()
-            
-            # Update UI in main thread
             self.root.after(0, lambda: self.update_phrase_ui(phrase_data))
-            
         except Exception as e:
             print(f"Error generating phrase: {e}")
-            # Fallback phrases
             fallback_phrases = [
                 ("The quick brown fox jumps over the lazy dog.", "Classic pangram for practicing all letters."),
                 ("She sells seashells by the seashore.", "Great for practicing 'sh' and 's' sounds."),
                 ("Peter Piper picked a peck of pickled peppers.", "Excellent alliteration practice.")
             ]
-            
             phrase, context = random.choice(fallback_phrases)
             phrase_data = {"phrase": phrase, "explanation": context}
             self.root.after(0, lambda: self.update_phrase_ui(phrase_data))
@@ -606,18 +570,16 @@ class VoiceBuddyAI:
         focus = self.settings['focus_area']
         phrases = sample_phrases.get(focus, sample_phrases['general'])
         
-        # Filter by phrase length if needed
         if self.settings['phrase_length'] == 'short':
             phrases = [p for p in phrases if len(p.split()) < 8]
         elif self.settings['phrase_length'] == 'long':
             phrases = [p for p in phrases if len(p.split()) > 12]
         
-        if not phrases:  # Fallback if no phrases match criteria
+        if not phrases:
             phrases = sample_phrases['general']
         
         selected_phrase = random.choice(phrases)
         
-        # Add topic interest if specified
         topic_interest = self.settings.get('topic_interest', '').strip()
         if topic_interest:
             topic_phrases = {
@@ -657,19 +619,16 @@ class VoiceBuddyAI:
         self.current_phrase = phrase_data["phrase"]
         self.current_context = phrase_data["explanation"]
         
-        # Update phrase display
         self.phrase_text.config(state='normal')
         self.phrase_text.delete('1.0', 'end')
         self.phrase_text.insert('1.0', self.current_phrase)
         self.phrase_text.config(state='disabled')
         
-        # Update context
         self.context_text.config(state='normal')
         self.context_text.delete('1.0', 'end')
         self.context_text.insert('1.0', f"🎯 Why this phrase: {self.current_context}")
         self.context_text.config(state='disabled')
         
-        # Re-enable button
         self.generate_btn.config(state='normal', text="🤖 Generate AI Phrase")
     
     def speak_phrase(self):
@@ -696,7 +655,7 @@ class VoiceBuddyAI:
     def toggle_recording(self):
         """Toggle recording state"""
         if not SPEECH_AVAILABLE:
-            messagebox.showwarning("Feature Unavailable", "Speech recognition not available. Please install openai-whisper and pyaudio.")
+            messagebox.showwarning("Feature Unavailable", "Speech recognition not available. Please install openai-whisper and sounddevice.")
             return
             
         if not self.whisper_model:
@@ -713,37 +672,37 @@ class VoiceBuddyAI:
             self.stop_recording()
     
     def start_recording(self):
-        """Start recording audio"""
+        """Start recording audio to a temporary file"""
         self.is_recording = True
-        self.audio_frames = []
+        self.audio_data = []
         self.record_btn.config(text="⏹️ Stop Recording", bg='#ef4444')
         
         def record():
             try:
-                # Initialize audio stream
-                stream = self.pyaudio_instance.open(
-                    format=self.audio_format,
+                print("Recording started...")
+                # Record audio using sounddevice
+                recording = sd.rec(
+                    int(30 * self.sample_rate),  # Max 30 seconds
+                    samplerate=self.sample_rate,
                     channels=self.channels,
-                    rate=self.rate,
-                    input=True,
-                    frames_per_buffer=self.chunk
+                    dtype='int16'
                 )
                 
-                print("Recording started...")
-                
-                # Record audio while is_recording is True
+                # Wait until recording is stopped or max duration reached
                 while self.is_recording:
-                    data = stream.read(self.chunk)
-                    self.audio_frames.append(data)
+                    sd.sleep(100)  # Sleep 100ms to avoid busy-waiting
                 
-                # Stop and close stream
-                stream.stop_stream()
-                stream.close()
+                sd.stop()
                 
                 print("Recording finished")
                 
+                # Save recording to temporary file
+                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
+                    self.temp_filename = temp_file.name
+                    sf.write(self.temp_filename, recording, self.sample_rate)
+                
                 # Process the recording
-                if self.audio_frames:
+                if self.temp_filename:
                     self.root.after(0, self.process_recording_with_whisper)
                 
             except Exception as e:
@@ -758,8 +717,90 @@ class VoiceBuddyAI:
     def stop_recording(self):
         """Stop recording"""
         self.is_recording = False
+    
+    def process_recording_with_whisper(self):
+        """Process recorded audio using Whisper and analyze results"""
+        try:
+            if not self.temp_filename or not os.path.exists(self.temp_filename):
+                raise ValueError("No audio file recorded")
+            
+            # Transcribe audio using Whisper
+            result = self.whisper_model.transcribe(self.temp_filename)
+            transcribed_text = result['text'].strip()
+            
+            # Clean up temporary file
+            os.unlink(self.temp_filename)
+            self.temp_filename = None
+            
+            # Update transcription display
+            self.transcription_text.config(state='normal')
+            self.transcription_text.delete('1.0', 'end')
+            self.transcription_text.insert('1.0', transcribed_text)
+            self.transcription_text.config(state='disabled')
+            
+            # Analyze transcription
+            analysis, score = self.analyze_transcription(transcribed_text)
+            
+            # Update analysis display
+            self.analysis_text.config(state='normal')
+            self.analysis_text.delete('1.0', 'end')
+            self.analysis_text.insert('1.0', analysis)
+            self.analysis_text.config(state='disabled')
+            
+            # Update score
+            self.score_var.set(f"{score}%")
+            
+            # Update user data
+            self.user_data['scores'].append(score)
+            self.user_data['total_sessions'] += 1
+            self.user_data['best_score'] = max(self.user_data['best_score'], score)
+            self.save_data()
+            
+            # Update UI elements
+            self.update_stats()
+            self.update_progress_chart()
+            
+        except Exception as e:
+            print(f"Processing error: {e}")
+            messagebox.showerror("Error", f"Error processing recording: {str(e)}")
+        
+        finally:
+            self.reset_record_button()
+    
+    def reset_record_button(self):
+        """Reset the record button state"""
+        self.is_recording = False
+        self.record_btn.config(text="🎙️ Record & Analyze", bg='#10b981')
+    
+    def analyze_transcription(self, transcribed_text):
+        """Analyze transcribed text against target phrase"""
+        target = self.current_phrase.lower()
+        transcribed = transcribed_text.lower()
+        
+        matcher = difflib.SequenceMatcher(None, target, transcribed)
+        similarity = matcher.ratio()
+        score = int(similarity * 100)
+        
+        analysis = f"Transcription Accuracy: {score}%\n"
+        
+        if score >= 90:
+            analysis += "Excellent! Your pronunciation is very accurate."
+        elif score >= 70:
+            analysis += "Good job! Minor pronunciation differences detected."
+        else:
+            analysis += "Needs improvement. Try focusing on clearer enunciation."
+            
+        differences = []
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag != 'equal':
+                differences.append(f"Expected '{target[i1:i2]}' but got '{transcribed[j1:j2]}'")
+        
+        if differences:
+            analysis += "\n\nDifferences found:\n" + "\n".join(differences)
+        
+        return analysis, score
+
 if __name__ == "__main__":
     root = tk.Tk()
     app = VoiceBuddyAI(root)
     root.mainloop()
-
