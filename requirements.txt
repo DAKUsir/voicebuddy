@@ -1,0 +1,7 @@
+matplotlib
+requests
+numpy
+sounddevice
+soundfile
+pyttsx3
+openai-whisper
